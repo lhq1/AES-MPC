@@ -41,17 +41,17 @@ def power(x, n):
     return mul
 
 
-dic = {}
-constants = [
-        0x63, 0x8F, 0xB5, 0x01, 0xF4, 0x25, 0xF9, 0x09, 0x05
-]
-powers = [
+dic_sbox = {}
+dic_sbox_inv = {}
+powers_sbox = [
         0, 127, 191, 223, 239, 247, 251, 253, 254
 ]
 for i in range(255):
-    for j in range(len(constants)):
-        if (powers[j], i) not in dic.keys():
-            dic[(powers[j], i)] = comb(powers[j], i)
+    for j in range(255):
+        if (j, i) not in dic_sbox.keys():
+            dic_sbox_inv[(j, i)] = comb(j, i)
+            if j in powers_sbox:
+                dic_sbox[(j,i)] = comb(j, i)
 
 
 class Player():
@@ -66,7 +66,7 @@ class Player():
     def send_num(self,number, target_ip, target_port):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((target_ip, target_port))
-        s.send(str(number).encode())
+        s.send(str(int(number)).encode())
         s.close()
 
     def prep_rec(self):
@@ -75,7 +75,8 @@ class Player():
         s.listen(1)
         self.conn, self.addr = s.accept()
         self.soc=s
-        data = self.conn.recv(10).decode()
+        data = self.conn.recv(100).decode()
+        data = GF256(int(data))
         self.conn.close()
         self.rec_port += 1
         self.other = data
@@ -117,6 +118,7 @@ class ComputePlayer(Player):
         for p in self.others:
             p.others.append(self)
         ComputePlayer.ComputeList.append(self)
+        self.compute_no = ComputePlayer.ComputeNum
         ComputePlayer.ComputeNum += 1
         self.keys = []
         self.plains = []
@@ -127,6 +129,7 @@ class ComputePlayer(Player):
         self.broadcast = None
         self.multiply_x,self.multiply_y = None, None
         self.target = None
+        self.powers_multiply = []
 
     def set_secrets(self, secrets):
         self.secrets = secrets[:]
@@ -160,7 +163,10 @@ class ComputePlayer(Player):
     # delta = x - a, epsilon = y-b, triple=[a],[b],[ab]
     def beaver_multiply_local(self, delta, epsilon, triple):
         a, b, c = triple
-        self.product = a * epsilon + b * delta + c + epsilon * delta
+        if self.compute_no == 0:
+            self.product = a * epsilon + b * delta + c + epsilon * delta
+        else:
+            self.product = a * epsilon + b * delta + c
         return self.product
 
     def set_multiply_x(self, value):
@@ -177,25 +183,29 @@ class ComputePlayer(Player):
         elif data == 'square':
             self.target = self.squares[num]
         elif data == 'input_square':
-            self.target = self.input_squares[num]
+            self.target = self.input_square[num]
         else:
             self.target = None
 
 
-    def poly_multiple_local(self, constants, powers, global_z, multiple):
+    def poly_multiple_local(self, constants, powers, global_z, multiple, mode='encode'):
         # calculate z^i
         z_powers = [global_z]
         for i in range(254):
             z_powers.append(z_powers[i] * global_z)
-
         # calculate coefficient(containing constant and combination)
         rank = [GF256(0)] * 255
         for i in range(255):
             for j in range(len(constants)):
                 if powers[j] >= i:
-                    if dic[(powers[j], i)] % 2 == 1: # characteristic = 2
+                    if mode=='encode':
+                        if dic_sbox[(powers[j], i)] % 2 == 1: # characteristic = 2
                         #rank[i] += GF256(constants[j]) * power(global_z, powers[j] - i)
-                        rank[i] += GF256(constants[j]) * z_powers[powers[j] - i]
+                            rank[i] += GF256(constants[j]) * z_powers[powers[j] - i]
+                    else:
+                        if dic_sbox_inv[(powers[j], i)] % 2 == 1: # characteristic = 2
+                        #rank[i] += GF256(constants[j]) * power(global_z, powers[j] - i)
+                            rank[i] += GF256(constants[j]) * z_powers[powers[j] - i]
         res = rank[0]
 
         for i in range(1, 255):
