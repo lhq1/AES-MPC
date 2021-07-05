@@ -6,9 +6,7 @@ import functools
 
 '''
 接下来的改进地方：
-1). 由于python GIL限制，无法充分发挥多线程的优势，考虑用更好的方式代替(比如多线程)
-2). 使用更加快速的通讯方式(最好是异步的)
-3). gmpy 优化
+可以考虑对于s盒和逆s盒采取并行化，减少通信轮数
 '''
 
 
@@ -97,16 +95,35 @@ class InputPlayer(Player):
     def __init__(self, ip='localhost', rec_port=5000):
         super().__init__(ip, rec_port)
 
-    def generate_keys(self, inputs):
+    def generate_keys(self, inputs, storage = 'memory'):
         shares = self.calculate_share(inputs)
-        for i in range(ComputePlayer.ComputeNum):
-            ComputePlayer.ComputeList[i].set_keys(shares[i])
+        if storage == 'memory':
+            for i in range(ComputePlayer.ComputeNum):
+                ComputePlayer.ComputeList[i].set_keys(shares[i])
+        elif storage == 'file':
+            for i in range(ComputePlayer.ComputeNum):
+                with open('key_P{}.txt'.format(i), 'w') as file:
+                    print(len(shares[i]))
+                    file.write(str(len(shares[i])))
+                    file.write('\n')
+                    for j in shares[i]:
+                        file.write(str(j))
+                        file.write('\n')
 
-    def generate_plains(self, inputs):
+    def generate_plains(self, inputs, storage='memory'):
         shares = self.calculate_share(inputs)
-        for i in range(ComputePlayer.ComputeNum):
-            ComputePlayer.ComputeList[i].set_plains(shares[i])
-
+        if storage == 'memory':
+            for i in range(ComputePlayer.ComputeNum):
+                ComputePlayer.ComputeList[i].set_plains(shares[i])
+        elif storage == 'file':
+            for i in range(ComputePlayer.ComputeNum):
+                with open('plain_P{}.txt'.format(i), 'w') as file:
+                    print(len(shares[i]))
+                    file.write(str(len(shares[i])))
+                    file.write('\n')
+                    for j in shares[i]:
+                        file.write(str(j))
+                        file.write('\n')
 
 class ComputePlayer(Player):
     ComputeNum = 0
@@ -137,6 +154,34 @@ class ComputePlayer(Player):
     def set_keys(self, keys):
         self.keys = keys[:]
         self.keys = reshape_16(self.keys)
+
+    def read_file(self, data, file_name=None):
+        if not file_name:
+            if data == 'key':
+                file_name = 'key_P{}.txt'.format(self.compute_no)
+            elif data == 'plain':
+                file_name = 'plain_P{}.txt'.format(self.compute_no)
+            elif data == 'beaver_triple':
+                file_name = 'beaver_triple_P{}.txt'.format(self.compute_no)
+            elif data  == 'multiple':
+                file_name = 'multiple_P{}.txt'.format(self.compute_no)
+            elif data == 'square':
+                file_name = 'sqaure_P{}.txt'.format(self.compute_no)
+        with open(file_name,'r') as file:
+            length = int(file.readline())
+            res = []
+            for i in range(length):
+                res.append(eval(file.readline()))
+            if data == 'key':
+                self.set_keys(res)
+            elif data == 'plain':
+                self.set_plains(res)
+            elif data == 'beaver_triple':
+                self.set_beaver_triples(res)
+            elif data == 'multiple':
+                self.set_multiples(res)
+            elif data == 'square':
+                self.set_squares(res)
 
     def set_plains(self, plains):
         self.plains = plains[:]
@@ -183,7 +228,7 @@ class ComputePlayer(Player):
         elif data == 'square':
             self.target = self.squares[num]
         elif data == 'input_square':
-            self.target = self.input_square[num]
+            self.target = self.input_squares[num]
         else:
             self.target = None
 
@@ -218,7 +263,7 @@ class TrustedThirdPlayer(Player):
     def __init__(self, ip='localhost', rec_port=5000):
         super().__init__(ip, rec_port)
 
-    def generate_multiple(self, number,  degree, repeat, method=0):
+    def generate_multiple(self, number,  degree, repeat, method=0, storage='memory'):
         all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
         for i in range(repeat):
             secures = []
@@ -239,10 +284,19 @@ class TrustedThirdPlayer(Player):
                     share_loop[i].append(res_share[i])
             for i in range(ComputePlayer.ComputeNum):
                 all_shares[i].append(share_loop[i])
-        for i in range(ComputePlayer.ComputeNum):
-            ComputePlayer.ComputeList[i].set_multiples(all_shares[i])
+        if storage == 'memory':
+            for i in range(ComputePlayer.ComputeNum):
+                ComputePlayer.ComputeList[i].set_multiples(all_shares[i])
+        elif storage == 'file':
+            for i in range(ComputePlayer.ComputeNum):
+                with open('multiple_P{}.txt'.format(i), 'w') as file:
+                    file.write(str(len(all_shares[i])))
+                    file.write('\n')
+                    for j in all_shares[i]:
+                        file.write(str(j))
+                        file.write('\n')
 
-    def generate_beaver_triple(self, number):
+    def generate_beaver_triple(self, number, storage= 'memory'):
         all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
         for i in range(number):
             a, b = GF256(random.randint(0, 255)), GF256(random.randint(0, 255))
@@ -250,10 +304,19 @@ class TrustedThirdPlayer(Player):
             res = self.calculate_share([a,b,c])
             for j in range(ComputePlayer.ComputeNum):
                 all_shares[j].append(res[j])
-        for i in range(ComputePlayer.ComputeNum):
-            ComputePlayer.ComputeList[i].set_beaver_triples(all_shares[i])
+        if storage == 'memory':
+            for i in range(ComputePlayer.ComputeNum):
+                ComputePlayer.ComputeList[i].set_beaver_triples(all_shares[i])
+        elif storage=='file':
+            for i in range(ComputePlayer.ComputeNum):
+                with open('beaver_triple_P{}.txt'.format(i), 'w') as file:
+                    file.write(str(len(all_shares[i])))
+                    file.write('\n')
+                    for j in all_shares[i]:
+                        file.write(str(j))
+                        file.write('\n')
 
-    def generate_squares(self, degree, repeat):
+    def generate_squares(self, degree, repeat, storage='memory'):
         all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
         for i in range(repeat):
             square_loop=[]
@@ -263,8 +326,18 @@ class TrustedThirdPlayer(Player):
             res = self.calculate_share(square_loop)
             for j in range(ComputePlayer.ComputeNum):
                 all_shares[j].append(res[j])
-        for i in range(ComputePlayer.ComputeNum):
-            ComputePlayer.ComputeList[i].set_squares(all_shares[i])
+        if storage=='memory':
+            for i in range(ComputePlayer.ComputeNum):
+                ComputePlayer.ComputeList[i].set_squares(all_shares[i])
+        elif storage == 'file':
+            for i in range(ComputePlayer.ComputeNum):
+                with open('square_P{}.txt'.format(i), 'w') as file:
+                    print(len(all_shares[i]))
+                    file.write(str(len(all_shares[i])))
+                    file.write('\n')
+                    for j in all_shares[i]:
+                        file.write(str(j))
+                        file.write('\n')
 
 
 class InputTTP(InputPlayer, TrustedThirdPlayer):
@@ -276,7 +349,11 @@ if __name__ == '__main__':
     a = InputTTP()
     players = [ComputePlayer(rec_port=5000), ComputePlayer(rec_port=6000)]
     times = 1
-    a.generate_keys([GF256(i) for i in range(16)])
-    a.generate_plains([GF256(i) for i in range(16)])
-    a.generate_beaver_triple(18 * times)
-    a.generate_multiple(1, 254, times)
+    a.generate_keys([GF256(i) for i in range(16)], 'file')
+    a.generate_plains([GF256(i) for i in range(16)], 'file')
+    a.generate_beaver_triple(18 * times, 'file')
+    a.generate_multiple(1, 254, times, storage='file')
+    players[0].read_file('key')
+    players[0].read_file('plain')
+    players[0].read_file('beaver_triple')
+    players[0].read_file('multiple')
