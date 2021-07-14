@@ -4,12 +4,6 @@ import random
 from itertools import combinations, combinations_with_replacement
 import functools
 
-'''
-接下来的改进地方：
-可以考虑对于s盒和逆s盒采取并行化，减少通信轮数
-'''
-
-
 # lis(16)->lis(4 * 4)
 def reshape_16(lis):
     res = [[] for _ in range(4)]
@@ -17,10 +11,6 @@ def reshape_16(lis):
         for j in range(4):
             res[i].append(lis[4 * i + j])
     return res
-
-
-def axis_1D(axis):
-    return (axis//4, axis%4)
 
 
 def comb(n, b):
@@ -39,17 +29,17 @@ def power(x, n):
     return mul
 
 
-dic_sbox = {}
-dic_sbox_inv = {}
-powers_sbox = [
-        0, 127, 191, 223, 239, 247, 251, 253, 254
-]
-for i in range(255):
-    for j in range(255):
-        if (j, i) not in dic_sbox.keys():
-            dic_sbox_inv[(j, i)] = comb(j, i)
-            if j in powers_sbox:
-                dic_sbox[(j,i)] = comb(j, i)
+def generate_comb_eff(powers):
+    comb_dic = set()
+    for i in powers:
+        for j in range(i):
+            if comb(i,j) % 2:
+                comb_dic.add((j,i))
+    return comb_dic
+
+
+def gen_rand_gf256():
+    return GF256(random.randint(0, 255))
 
 
 class Player():
@@ -61,10 +51,11 @@ class Player():
         self.ip = ip
         self.rec_port = rec_port
 
-    def send_num(self,number, target_ip, target_port):
+    def send_num(self,lis, target_ip, target_port):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.connect((target_ip, target_port))
-        s.send(str(int(number)).encode())
+        lis = [int(i) for i in lis]
+        s.send(str(lis).encode())
         s.close()
 
     def prep_rec(self):
@@ -73,21 +64,38 @@ class Player():
         s.listen(1)
         self.conn, self.addr = s.accept()
         self.soc=s
-        data = self.conn.recv(100).decode()
-        data = GF256(int(data))
+        data = self.conn.recv(10000).decode()
+        data = [GF256(i) for i in eval(data)]
         self.conn.close()
         self.rec_port += 1
         self.other = data
 
+    # this function is used by input_player and trusted_third_player
+    # input-- inputs: list
+    # output -- shares : two-dim list(first-dim:player, second-dim: additive secret sharing)
     def calculate_share(self, inputs):
         shares = [[] for _ in range(ComputePlayer.ComputeNum)]
         for i in inputs:
             sum = GF256(0)
             for j in range(ComputePlayer.ComputeNum - 1):
-                temp = GF256(random.randint(0, 255))
+                temp = gen_rand_gf256()
                 shares[j].append(temp)
                 sum += temp
             shares[ComputePlayer.ComputeNum-1].append(i - sum)
+        return shares
+
+    def calculate_share_mac(self, inputs):
+        shares = [[] for _ in range(ComputePlayer.ComputeNum)]
+        for i in inputs:
+            sum1 = GF256(0)
+            sum2 = GF256(0)
+            for j in range(ComputePlayer.ComputeNum - 1):
+                temp1 = gen_rand_gf256()
+                temp2 = gen_rand_gf256()
+                shares[j].append((temp1, temp2))
+                sum1 += temp1
+                sum2 += temp2
+            shares[ComputePlayer.ComputeNum-1].append((i[0] - sum1, i[1]-sum2))
         return shares
 
 
@@ -95,7 +103,7 @@ class InputPlayer(Player):
     def __init__(self, ip='localhost', rec_port=5000):
         super().__init__(ip, rec_port)
 
-    def generate_keys(self, inputs, storage = 'memory'):
+    def generate_keys(self, inputs, storage='memory'):
         shares = self.calculate_share(inputs)
         if storage == 'memory':
             for i in range(ComputePlayer.ComputeNum):
@@ -110,14 +118,16 @@ class InputPlayer(Player):
                         file.write(str(j))
                         file.write('\n')
 
-    def generate_plains(self, inputs, storage='memory'):
+    # encode plain_text
+    # decode cipher_text
+    def generate_texts(self, inputs, storage='memory'):
         shares = self.calculate_share(inputs)
         if storage == 'memory':
             for i in range(ComputePlayer.ComputeNum):
-                ComputePlayer.ComputeList[i].set_plains(shares[i])
+                ComputePlayer.ComputeList[i].set_texts(shares[i])
         elif storage == 'file':
             for i in range(ComputePlayer.ComputeNum):
-                with open('plain_P{}.txt'.format(i), 'w') as file:
+                with open('text_P{}.txt'.format(i), 'w') as file:
                     print(len(shares[i]))
                     file.write(str(len(shares[i])))
                     file.write('\n')
@@ -125,11 +135,13 @@ class InputPlayer(Player):
                         file.write(str(j))
                         file.write('\n')
 
+
 class ComputePlayer(Player):
     ComputeNum = 0
     ComputeList = []
+    TTP = None
 
-    def __init__(self, ip='localhost', rec_port=5000):
+    def __init__(self, ttp, ip='localhost', rec_port=5000):
         super().__init__(ip, rec_port)
         self.others = ComputePlayer.ComputeList[:]
         for p in self.others:
@@ -137,132 +149,161 @@ class ComputePlayer(Player):
         ComputePlayer.ComputeList.append(self)
         self.compute_no = ComputePlayer.ComputeNum
         ComputePlayer.ComputeNum += 1
+        ComputePlayer.TTP = ttp
         self.keys = []
-        self.plains = []
+        self.texts = []
+        self.shares = []
         self.beaver_triples = []
         self.multiples = []
         self.squares = []
-        self.input_squares = []
-        self.broadcast = None
-        self.multiply_x,self.multiply_y = None, None
-        self.target = None
-        self.powers_multiply = []
+        self.input_square = []
+        self.shares = []
 
-    def set_secrets(self, secrets):
-        self.secrets = secrets[:]
+    def set_shares(self, shares):
+        self.shares.extend(shares)
 
     def set_keys(self, keys):
         self.keys = keys[:]
         self.keys = reshape_16(self.keys)
 
-    def read_file(self, data, file_name=None):
-        if not file_name:
-            if data == 'key':
-                file_name = 'key_P{}.txt'.format(self.compute_no)
-            elif data == 'plain':
-                file_name = 'plain_P{}.txt'.format(self.compute_no)
-            elif data == 'beaver_triple':
-                file_name = 'beaver_triple_P{}.txt'.format(self.compute_no)
-            elif data  == 'multiple':
-                file_name = 'multiple_P{}.txt'.format(self.compute_no)
-            elif data == 'square':
-                file_name = 'sqaure_P{}.txt'.format(self.compute_no)
-        with open(file_name,'r') as file:
-            length = int(file.readline())
-            res = []
-            for i in range(length):
-                res.append(eval(file.readline()))
-            if data == 'key':
-                self.set_keys(res)
-            elif data == 'plain':
-                self.set_plains(res)
-            elif data == 'beaver_triple':
-                self.set_beaver_triples(res)
-            elif data == 'multiple':
-                self.set_multiples(res)
-            elif data == 'square':
-                self.set_squares(res)
+    def set_texts(self, keys):
+        self.texts = keys[:]
+        self.texts = reshape_16(self.texts)
 
-    def set_plains(self, plains):
-        self.plains = plains[:]
-        self.plains = reshape_16(self.plains)
-
-    def set_plain_row(self, row, num):
-        self.plains[num] = row
-
-    def get_plain_row(self, num):
-        return self.plains[num]
+    def set_beaver_triples(self, beavers):
+        self.beaver_triples.extend(beavers)
 
     def set_squares(self, squares):
         self.squares = squares[:]
 
-    def set_beaver_triples(self, beaver_triples):
-        self.beaver_triples = beaver_triples[:]
-
     def set_multiples(self, multiples):
         self.multiples = multiples[:]
 
-    def set_global(self, broadcast):
-        self.broadcast = broadcast
+    def generate_mac(self, method='memory'):
+        self.mac = gen_rand_gf256()
 
-    # delta = x - a, epsilon = y-b, triple=[a],[b],[ab]
-    def beaver_multiply_local(self, delta, epsilon, triple):
+        if method == 'memory':
+            ComputePlayer.TTP.calculate_mac_sum(self.mac)
+        elif method == 'file':
+            with open('mac_P{}.txt'.format(self.compute_no), 'w') as file:
+                file.write(str(self.mac))
+
+    def beaver_multiply_local(self, multiply_x_mask, multiply_y_mask, triple):
         a, b, c = triple
+
         if self.compute_no == 0:
-            self.product = a * epsilon + b * delta + c + epsilon * delta
+            temp1 = a[0] * multiply_y_mask + b[0] * multiply_x_mask + c[0] + multiply_y_mask * multiply_x_mask
         else:
-            self.product = a * epsilon + b * delta + c
-        return self.product
+            temp1 = a[0] * multiply_y_mask + b[0] * multiply_x_mask + c[0]
+        temp2 = a[1] * multiply_y_mask + b[1] * multiply_x_mask + c[1] + multiply_y_mask * multiply_x_mask*self.mac
+        product = (temp1, temp2)
+        return product
 
-    def set_multiply_x(self, value):
-        self.multiply_x = value
-
-    def set_multiply_y(self, value):
-        self.multiply_y = value
-
-    def set_target(self, data, num):
-        if data == 'plain':
-            self.target = self.plains[num[0]][num[1]]
-        elif data == 'key':
-            self.target = self.keys[num[0]][num[1]]
-        elif data == 'square':
-            self.target = self.squares[num]
-        elif data == 'input_square':
-            self.target = self.input_squares[num]
-        else:
-            self.target = None
-
-
-    def poly_multiple_local(self, constants, powers, global_z, multiple, mode='encode'):
-        # calculate z^i
-        z_powers = [global_z]
-        for i in range(254):
-            z_powers.append(z_powers[i] * global_z)
-        # calculate coefficient(containing constant and combination)
-        rank = [GF256(0)] * 255
-        for i in range(255):
-            for j in range(len(constants)):
-                if powers[j] >= i:
-                    if mode=='encode':
-                        if dic_sbox[(powers[j], i)] % 2 == 1: # characteristic = 2
-                        #rank[i] += GF256(constants[j]) * power(global_z, powers[j] - i)
-                            rank[i] += GF256(constants[j]) * z_powers[powers[j] - i]
-                    else:
-                        if dic_sbox_inv[(powers[j], i)] % 2 == 1: # characteristic = 2
-                        #rank[i] += GF256(constants[j]) * power(global_z, powers[j] - i)
-                            rank[i] += GF256(constants[j]) * z_powers[powers[j] - i]
-        res = rank[0]
-
-        for i in range(1, 255):
-            res += multiple[i-1][0] * rank[i]
-
+    # multiply_mask -- (x1-a1, y1-b1,x2-a2,y2-b2,...)
+    # triple -- (([a1],[b1],[c1]), ([a2],[b2],[c2]), ...)
+    def beaver_multiply_parallel(self, multiply_mask,  triple):
+        assert (2 * len(triple) == len(multiply_mask))
+        res = []
+        for i in range(len(triple)):
+            product = self.beaver_multiply_local(multiply_mask[2 * i], multiply_mask[2* i + 1], triple[i])
+            res.append(product)
         return res
 
+    def set_multiply_mask(self, value):
+        self.multiply_multiply_mask = value[:]
 
 class TrustedThirdPlayer(Player):
     def __init__(self, ip='localhost', rec_port=5000):
         super().__init__(ip, rec_port)
+        self.mac_sum = GF256(0)
 
+    def calculate_mac_sum(self, value):
+        if type(value) == GF256:
+            self.mac_sum+= value
+        else:
+            with open(value, 'r') as file:
+                self.mac_sum += GF256(int(file.readline()))
+
+    def generate_mac_share(self, number, method='memory'):
+        all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
+        for i in range(number):
+            num = gen_rand_gf256()
+            mac_num = num * self.mac_sum
+            temp = (num, mac_num)
+            shares = self.calculate_share(temp)
+
+            for j in range(ComputePlayer.ComputeNum):
+                all_shares[j].append(tuple(shares[j]))
+        if method == 'memory':
+            for i in range(ComputePlayer.ComputeNum):
+                ComputePlayer.ComputeList[i].set_shares(all_shares[i])
+        elif method == 'file':
+            for i in range(ComputePlayer.ComputeNum):
+                with open('mac_share_P{}.txt'.format(i), 'w') as file:
+                    print(len(all_shares[i]))
+                    file.write(str(len(all_shares[i])))
+                    file.write('\n')
+                    for j in all_shares[i]:
+                        file.write(str(j))
+                        file.write('\n')
+        else:
+            return all_shares
+
+    def generate_squares(self, degree, repeat, storage='memory'):
+        all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
+        for i in range(repeat):
+            square_loop = []
+            temp = gen_rand_gf256()
+            mac_num = temp * self.mac_sum
+            square_loop.append((temp, mac_num))
+            for j in range(1, degree):
+                temp = square_loop[j-1][0] * square_loop[j-1][0]
+                mac_num = temp * self.mac_sum
+                square_loop.append((temp, mac_num))
+            res = self.calculate_share_mac(square_loop)
+            for j in range(ComputePlayer.ComputeNum):
+                all_shares[j].append(res[j])
+        if storage == 'memory':
+            for i in range(ComputePlayer.ComputeNum):
+                ComputePlayer.ComputeList[i].set_squares(all_shares[i])
+        elif storage == 'file':
+            for i in range(ComputePlayer.ComputeNum):
+                with open('square_P{}.txt'.format(i), 'w') as file:
+                    print(len(all_shares[i]))
+                    file.write(str(len(all_shares[i])))
+                    file.write('\n')
+                    for j in all_shares[i]:
+                        file.write(str(j))
+                        file.write('\n')
+
+    def generate_beaver_triples(self, number, method='memory'):
+        all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
+        for i in range(number):
+            a = gen_rand_gf256()
+            b = gen_rand_gf256()
+            c = a * b
+            temp = (a, b, c, a * self.mac_sum, b*self.mac_sum, c*self.mac_sum)
+            shares = self.calculate_share(temp)
+
+            for j in range(ComputePlayer.ComputeNum):
+                beaver_mac = tuple((shares[j][k], shares[j][k+3]) for k in range(3))
+                all_shares[j].append(beaver_mac)
+                #all_shares[j].append(tuple(shares[j][:3]))
+        if method == 'memory':
+            for i in range(ComputePlayer.ComputeNum):
+                ComputePlayer.ComputeList[i].set_beaver_triples(all_shares[i])
+        elif method == 'file':
+            for i in range(ComputePlayer.ComputeNum):
+                with open('beaver_triple_P{}.txt'.format(i), 'w') as file:
+                    print(len(all_shares[i]))
+                    file.write(str(len(all_shares[i])))
+                    file.write('\n')
+                    for j in all_shares[i]:
+                        file.write(str(j))
+                        file.write('\n')
+
+    # method 0 --  repeat eg, (x,y,z) ->(x^2, y^2, ...)
+    # method 1 --  no repeat eg,(x,y,z)-> (xy,yz,xz,xyz)
     def generate_multiple(self, number,  degree, repeat, method=0, storage='memory'):
         all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
         for i in range(repeat):
@@ -270,13 +311,12 @@ class TrustedThirdPlayer(Player):
             share_loop = [[] for _ in range(ComputePlayer.ComputeNum)]
 
             for j in range(number):
-                secures.append(GF256(random.randint(0, 255)))
-            tmp = secures
+                secures.append(gen_rand_gf256())
+            res = secures
             for d in range(1, degree+1):
                 if method == 0:
                     #res = [functools.reduce(lambda x, y: x*y, i) for i in combinations_with_replacement(secures, d)]
-                    res = tmp
-                    tmp = [x * y for x in tmp for y in secures]
+                    res = [x * y for x in res for y in secures]
                 else:
                     res = [functools.reduce(lambda x, y: x*y, i) for i in combinations(secures, d)]
                 res_share = self.calculate_share(res)
@@ -296,64 +336,21 @@ class TrustedThirdPlayer(Player):
                         file.write(str(j))
                         file.write('\n')
 
-    def generate_beaver_triple(self, number, storage= 'memory'):
-        all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
-        for i in range(number):
-            a, b = GF256(random.randint(0, 255)), GF256(random.randint(0, 255))
-            c = a * b
-            res = self.calculate_share([a,b,c])
-            for j in range(ComputePlayer.ComputeNum):
-                all_shares[j].append(res[j])
-        if storage == 'memory':
-            for i in range(ComputePlayer.ComputeNum):
-                ComputePlayer.ComputeList[i].set_beaver_triples(all_shares[i])
-        elif storage=='file':
-            for i in range(ComputePlayer.ComputeNum):
-                with open('beaver_triple_P{}.txt'.format(i), 'w') as file:
-                    file.write(str(len(all_shares[i])))
-                    file.write('\n')
-                    for j in all_shares[i]:
-                        file.write(str(j))
-                        file.write('\n')
 
-    def generate_squares(self, degree, repeat, storage='memory'):
-        all_shares = [[] for _ in range(ComputePlayer.ComputeNum)]
-        for i in range(repeat):
-            square_loop=[]
-            square_loop.append(GF256(random.randint(0, 255)))
-            for j in range(1, degree):
-                square_loop.append(power(square_loop[j-1], 2))
-            res = self.calculate_share(square_loop)
-            for j in range(ComputePlayer.ComputeNum):
-                all_shares[j].append(res[j])
-        if storage=='memory':
-            for i in range(ComputePlayer.ComputeNum):
-                ComputePlayer.ComputeList[i].set_squares(all_shares[i])
-        elif storage == 'file':
-            for i in range(ComputePlayer.ComputeNum):
-                with open('square_P{}.txt'.format(i), 'w') as file:
-                    print(len(all_shares[i]))
-                    file.write(str(len(all_shares[i])))
-                    file.write('\n')
-                    for j in all_shares[i]:
-                        file.write(str(j))
-                        file.write('\n')
-
-
-class InputTTP(InputPlayer, TrustedThirdPlayer):
-    def __init__(self,ip='localhost', rec_port=5000):
+class inputTTP(InputPlayer, TrustedThirdPlayer):
+    def __init__(self, ip='localhost', rec_port=5000):
         super().__init__(ip, rec_port)
 
 
 if __name__ == '__main__':
-    a = InputTTP()
-    players = [ComputePlayer(rec_port=5000), ComputePlayer(rec_port=6000)]
-    times = 1
-    a.generate_keys([GF256(i) for i in range(16)], 'file')
-    a.generate_plains([GF256(i) for i in range(16)], 'file')
-    a.generate_beaver_triple(18 * times, 'file')
-    a.generate_multiple(1, 254, times, storage='file')
-    players[0].read_file('key')
-    players[0].read_file('plain')
-    players[0].read_file('beaver_triple')
-    players[0].read_file('multiple')
+    #print(generate_comb_eff([i for i in range(255)]))
+    #print(generate_comb_eff([0, 127, 191, 223, 239, 247, 251, 253, 254]))
+    a = TrustedThirdPlayer(rec_port=4000)
+    players = [ComputePlayer(a, rec_port=5000), ComputePlayer(a, rec_port=6000)]
+    for p in players:
+        p.generate_mac()
+    a.generate_squares(8, 1)
+    a.generate_beaver_triples(10)
+    a.generate_multiple(1, 254, 1, storage='file')
+    multiply_mask = [gen_rand_gf256() for i in range(20)]
+    print(players[0].beaver_multiply_parallel(multiply_mask, players[0].beaver_triples))
